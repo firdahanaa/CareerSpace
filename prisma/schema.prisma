@@ -1,0 +1,397 @@
+// MyCareerSpace — skema database (berdasarkan PRD bagian 5 dan 7)
+//
+// Prinsip yang tercermin di skema ini:
+//  1. Satu admin, satu profil, satu database karier.
+//  2. `published` (publik) dan pemilihan ke CV adalah dua hal independen.
+//  3. CV hanya menyimpan REFERENSI ke record karier, bukan salinannya.
+//  4. Menghapus record yang dipakai CV tidak boleh diam-diam: relasi memakai
+//     onDelete: Restrict, jadi aplikasi WAJIB menampilkan peringatan dan
+//     menghapus CvRecordSelection terkait secara eksplisit lebih dulu.
+//  5. Export PDF adalah snapshot (CvExport), tidak berubah saat data berubah.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Enums ─────────────────────────
+
+enum ProjectType {
+  ACADEMIC
+  PERSONAL
+  FREELANCE
+  ORGANIZATIONAL
+  PROFESSIONAL
+  OTHER
+}
+
+enum ExperienceCategory {
+  EMPLOYMENT
+  INTERNSHIP
+  ORGANIZATION
+  VOLUNTEERING
+  FREELANCE
+}
+
+enum SkillCategory {
+  TECHNICAL
+  ANALYTICAL
+  BUSINESS
+  INTERPERSONAL
+  LANGUAGE
+  OTHER
+}
+
+enum ProficiencyLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+  EXPERT
+}
+
+enum CvTemplate {
+  CLASSIC
+  MODERN_MINIMAL
+}
+
+enum CvSectionKey {
+  SUMMARY
+  EXPERIENCE
+  EDUCATION
+  SKILLS
+  PROJECTS
+  CERTIFICATIONS
+}
+
+enum SelectionSource {
+  MANUAL // dipilih admin sendiri
+  SUGGESTED // berasal dari saran berbasis aturan
+}
+
+enum SelectionStatus {
+  INCLUDED // masuk CV
+  REJECTED // saran yang ditolak: tidak masuk CV, record sumber tetap utuh
+}
+
+enum ExportStatus {
+  SUCCESS
+  FAILED
+}
+
+// ───────────────────── Akun & profil ─────────────────────
+
+model Administrator {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String // hash bcrypt/argon2, tidak pernah plaintext
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profile Profile? // satu admin memiliki satu profil utama
+}
+
+model Profile {
+  id              String   @id @default(cuid())
+  administratorId String   @unique
+  fullName        String // wajib
+  headline        String // wajib
+  summary         String?  @db.Text
+  photoUrl        String?
+  email           String?
+  phone           String?
+  location        String? // kota / negara
+  linkedinUrl     String?
+  githubUrl       String?
+  otherLinks      Json? // [{ label, url }]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  administrator  Administrator      @relation(fields: [administratorId], references: [id], onDelete: Cascade)
+  projects       Project[]
+  experiences    Experience[]
+  educations     Education[]
+  skills         Skill[]
+  certifications Certification[]
+  cvConfigs      CvConfig[]
+  settings       PortfolioSettings?
+}
+
+model PortfolioSettings {
+  id          String  @id @default(cuid())
+  profileId   String  @unique
+  slug        String  @unique // identitas URL publik
+  isPublished Boolean @default(false) // status portofolio secara keseluruhan
+
+  // Visibilitas kontak publik (PROF-05)
+  showEmail    Boolean @default(false)
+  showPhone    Boolean @default(false)
+  showLocation Boolean @default(true)
+  showLinkedin Boolean @default(true)
+  showGithub   Boolean @default(true)
+
+  // CV default yang boleh diunduh publik (opsional)
+  defaultCvId String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  profile   Profile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  defaultCv CvConfig? @relation("DefaultPublicCv", fields: [defaultCvId], references: [id], onDelete: SetNull)
+}
+
+// ───────────────────── Record karier ─────────────────────
+// Semua record: published default false. Publikasi tidak mempengaruhi CV.
+
+model Project {
+  id               String       @id @default(cuid())
+  profileId        String
+  slug             String // untuk halaman detail publik
+  title            String
+  shortSummary     String // wajib: kartu portofolio & deskripsi CV
+  description      String?      @db.Text
+  role             String?
+  projectType      ProjectType?
+  startDate        DateTime?
+  endDate          DateTime?
+  isOngoing        Boolean      @default(false)
+  technologies     String[] // tag bebas; dipakai untuk saran CV
+  responsibilities String[]
+  outcomes         String[]
+  repositoryUrl    String?
+  demoUrl          String?
+  coverImageUrl    String?
+  featured         Boolean      @default(false)
+  published        Boolean      @default(false)
+  sortOrder        Int          @default(0)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  profile      Profile             @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  skills       ProjectSkill[]
+  cvSelections CvRecordSelection[]
+
+  @@unique([profileId, slug])
+  @@index([profileId, published])
+}
+
+model Experience {
+  id               String             @id @default(cuid())
+  profileId        String
+  organization     String
+  position         String
+  category         ExperienceCategory
+  location         String?
+  startDate        DateTime?
+  endDate          DateTime?
+  isCurrent        Boolean            @default(false)
+  description      String?            @db.Text
+  responsibilities String[]
+  achievements     String[]
+  published        Boolean            @default(false)
+  sortOrder        Int                @default(0)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  profile      Profile             @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  skills       ExperienceSkill[]
+  cvSelections CvRecordSelection[]
+
+  @@index([profileId, published])
+}
+
+model Education {
+  id           String    @id @default(cuid())
+  profileId    String
+  institution  String
+  degree       String?
+  fieldOfStudy String?
+  startDate    DateTime?
+  endDate      DateTime? // atau perkiraan lulus
+  isCurrent    Boolean   @default(false)
+  gpa          String? // string agar fleksibel ("3.85/4.00")
+  description  String?   @db.Text
+  published    Boolean   @default(false)
+  sortOrder    Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  profile      Profile             @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  cvSelections CvRecordSelection[]
+
+  @@index([profileId, published])
+}
+
+model Skill {
+  id          String            @id @default(cuid())
+  profileId   String
+  name        String
+  category    SkillCategory
+  proficiency ProficiencyLevel? // opsional, self-assessed
+  published   Boolean           @default(false)
+  sortOrder   Int               @default(0)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  profile      Profile             @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  projects     ProjectSkill[]
+  experiences  ExperienceSkill[]
+  cvSelections CvRecordSelection[]
+
+  @@unique([profileId, name])
+  @@index([profileId, published])
+}
+
+// Sertifikasi dan pencapaian (achievement) digabung di satu model.
+model Certification {
+  id             String    @id @default(cuid())
+  profileId      String
+  title          String
+  issuer         String?
+  issueDate      DateTime?
+  expirationDate DateTime?
+  credentialId   String?
+  credentialUrl  String?
+  description    String?   @db.Text
+  published      Boolean   @default(false)
+  sortOrder      Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  profile      Profile             @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  cvSelections CvRecordSelection[]
+
+  @@index([profileId, published])
+}
+
+// Relasi many-to-many skill ↔ project / experience (bukan teks bebas)
+model ProjectSkill {
+  projectId String
+  skillId   String
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  skill   Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, skillId])
+}
+
+model ExperienceSkill {
+  experienceId String
+  skillId      String
+
+  experience Experience @relation(fields: [experienceId], references: [id], onDelete: Cascade)
+  skill      Skill      @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([experienceId, skillId])
+}
+
+// ───────────────────────── CV ─────────────────────────
+
+model CvConfig {
+  id              String     @id @default(cuid())
+  profileId       String
+  name            String // mis. "Data Analyst CV"
+  targetRole      String
+  summaryOverride String?    @db.Text // tidak mengubah ringkasan profil utama
+  template        CvTemplate @default(CLASSIC)
+
+  // Publikasi CV bersifat eksplisit. publicToken acak & tak bisa ditebak;
+  // hanya dipakai bila published = true.
+  published   Boolean @default(false)
+  publicToken String? @unique
+
+  lastGeneratedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  profile    Profile             @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  sections   CvSection[]
+  selections CvRecordSelection[]
+  exports    CvExport[]
+  defaultFor PortfolioSettings?  @relation("DefaultPublicCv")
+
+  @@index([profileId])
+}
+
+model CvSection {
+  id      String       @id @default(cuid())
+  cvId    String
+  key     CvSectionKey
+  enabled Boolean      @default(true)
+  order   Int
+
+  cv CvConfig @relation(fields: [cvId], references: [id], onDelete: Cascade)
+
+  @@unique([cvId, key])
+}
+
+// Satu baris = satu record karier yang dipilih (atau ditolak) untuk satu CV.
+//
+// PENTING: tepat SATU dari projectId/experienceId/educationId/skillId/
+// certificationId harus terisi. Prisma tidak bisa menyatakan ini, jadi tambahkan
+// CHECK constraint lewat migrasi SQL manual (lihat catatan di bawah).
+//
+// onDelete: Restrict → record yang masih dipakai CV tidak bisa terhapus diam-diam.
+model CvRecordSelection {
+  id               String          @id @default(cuid())
+  cvId             String
+  order            Int             @default(0)
+  source           SelectionSource @default(MANUAL)
+  status           SelectionStatus @default(INCLUDED)
+  suggestionReason String? // alasan saran yang terlihat oleh admin
+
+  projectId       String?
+  experienceId    String?
+  educationId     String?
+  skillId         String?
+  certificationId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cv            CvConfig       @relation(fields: [cvId], references: [id], onDelete: Cascade)
+  project       Project?       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  experience    Experience?    @relation(fields: [experienceId], references: [id], onDelete: Restrict)
+  education     Education?     @relation(fields: [educationId], references: [id], onDelete: Restrict)
+  skill         Skill?         @relation(fields: [skillId], references: [id], onDelete: Restrict)
+  certification Certification? @relation(fields: [certificationId], references: [id], onDelete: Restrict)
+
+  // Satu record hanya boleh muncul sekali per CV
+  @@unique([cvId, projectId])
+  @@unique([cvId, experienceId])
+  @@unique([cvId, educationId])
+  @@unique([cvId, skillId])
+  @@unique([cvId, certificationId])
+  @@index([cvId, order])
+}
+
+// Snapshot hasil export PDF
+model CvExport {
+  id            String       @id @default(cuid())
+  cvId          String
+  generatedAt   DateTime     @default(now())
+  template      CvTemplate // template yang dipakai saat export
+  fileReference String? // path/URL privat ke file PDF
+  status        ExportStatus
+  errorMessage  String?
+
+  cv CvConfig @relation(fields: [cvId], references: [id], onDelete: Cascade)
+
+  @@index([cvId, generatedAt])
+}
+
+// ───────────────────────────────────────────────────────────
+// CATATAN MIGRASI (jalankan sebagai SQL manual setelah migrasi pertama):
+//
+// ALTER TABLE "CvRecordSelection" ADD CONSTRAINT cv_selection_exactly_one_record
+//   CHECK (
+//     (("projectId" IS NOT NULL)::int +
+//      ("experienceId" IS NOT NULL)::int +
+//      ("educationId" IS NOT NULL)::int +
+//      ("skillId" IS NOT NULL)::int +
+//      ("certificationId" IS NOT NULL)::int) = 1
+//   );
+// ───────────────────────────────────────────────────────────
